@@ -1,0 +1,44 @@
+# Build-Artefakte
+/target/
+**/target/
+*.pdb
+*.rs.bk
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.vs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Lokale Zertifikate/Keys aus dem Testpfad (README.md, "Kompilieren &
+# Testen", Schritt 4) — private Keys duerfen nie ins Repo.
+/certs/
+*.pem
+*.key
+*.p12
+*.pfx
+*.csr
+*.srl
+
+# Lokale/operative Config — client-/umgebungsspezifisch, kein Vorlagen-
+# Beispiel (config/clients.example.yaml bleibt bewusst getrackt).
+config/clients.yaml
+
+# Secrets / Umgebungsvariablen
+.env
+.env.*
+
+# SoftHSM2-Testtoken (README.md, Abschnitt 3)
+softhsm2.conf
+/softhsm2-tokens/
+
+# Laufzeitdaten: Audit-Log, sonstige Logs
+*.jsonl
+*.log

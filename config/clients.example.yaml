@@ -1,0 +1,34 @@
+# Autorisierungs-Config: pro Client (identifiziert über den CN seines
+# mTLS-Client-Zertifikats) wird explizit festgelegt, welche Operationen
+# er auf welchen Key-Labels ausführen darf.
+#
+# Prinzip: Default-Deny. Ein Client, der hier nicht auftaucht, wird
+# abgelehnt, bevor überhaupt eine PKCS#11-Session geöffnet wird.
+# Ein Client, der auftaucht, darf NUR die hier gelisteten
+# (operation, key_label)-Kombinationen — nichts sonst, und insbesondere
+# keine Objekt-Management-, Backup- oder Verwaltungsoperationen, da
+# dieser Dienst dafür schlicht keine Funktionen bereitstellt (siehe
+# README.md, Abschnitt "Bewusst nicht enthalten").
+
+clients:
+  - cn: "app-a.internal.example"
+    description: "Beispiel: darf nur mit einem gemeinsamen Encryption-Key ver-/entschlüsseln"
+    permissions:
+      - operation: encrypt
+        key_labels: ["shared-encryption-key"]
+      - operation: decrypt
+        key_labels: ["shared-encryption-key"]
+
+  - cn: "app-b.internal.example"
+    description: "Beispiel: darf nur mit ihrem eigenen Key signieren/verifizieren"
+    permissions:
+      - operation: sign
+        key_labels: ["app-b-signing-key"]
+      - operation: verify
+        key_labels: ["app-b-signing-key"]
+
+  - cn: "app-c.internal.example"
+    description: "Beispiel: Key-Derivation fuer ein einzelnes Wrapping-Szenario"
+    permissions:
+      - operation: derive
+        key_labels: ["app-c-derive-key"]
