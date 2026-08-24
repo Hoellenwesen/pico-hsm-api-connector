@@ -19,6 +19,7 @@ Risiko und reduziert die Angriffsfläche/Wartungslast auf einen Dienst.
 | Transport | Unix-Domain-Socket, lokal | mTLS über TCP, auch für lokale Clients (z. B. `127.0.0.1:8443`) |
 | Auth | Token pro Client, Hash in `clients.yaml` | Client-Zertifikat (mTLS), CN in `clients.yaml` |
 | Operationen | Sign, Verify, Encrypt, Decrypt, WrapKey, UnwrapKey, GenerateKeyPair, FindObjects | Sign, Verify, Encrypt, Decrypt, DeriveAndEncrypt, DeriveAndDecrypt |
+| Autorisierung Derive | — | `derive_and_encrypt` und `derive_and_decrypt` sind getrennte Permissions, jeweils mit eigener Peer-Key-Allowlist |
 
 ## Bewusster Funktionsverlust
 
@@ -64,12 +65,28 @@ damit wrappen" — funktional identisch zu `DeriveAndEncrypt` mit
 {"op": "derive_and_encrypt", "key_label": "pqvault-wrap-key", "derive_mechanism": "ecdh1_derive", "target_mechanism": "aes_cbc_pad", "peer_public_key_b64": "<Public Key der Gegenseite>", "data_b64": "<AES-Key base64>"}
 ```
 
+Die Antwort enthält neben `result_b64` auch `iv_b64` und
+`integrity_b64` — beide müssen zusammen mit dem Ciphertext gespeichert
+und beim Entwrappen mitgegeben werden. Gegenüber dem alten
+`wrap_key()`, das nur einen Blob zurückgab, ist das ein
+Datenmodell-Unterschied: Wer bisher nur den Wrapped-Key persistiert hat,
+braucht jetzt zwei zusätzliche Felder im Speicherformat.
+
 `peer_public_key_b64` ist Pflicht — `ECDH1_DERIVE` berechnet das Shared
 Secret aus dem privaten Key im HSM und dem Public Key der Gegenseite,
 ohne ihn lässt sich kein Shared Secret berechnen (siehe README.md,
 Abschnitt "Wire-Format"). Die Antwort enthält zusätzlich `iv_b64` (der
 frisch generierte AES-CBC-IV) — für `derive_and_decrypt` muss dieser
 Wert mitgeschickt werden.
+
+**Wichtig gegenüber dem alten `wrap_key()`:** Der Peer-Public-Key ist
+kein frei wählbarer Parameter. Er muss vorab in `clients.yaml` unter
+`peer_public_keys` freigegeben sein, sonst antwortet das Gateway mit
+`"status":"denied"`. Hintergrund und Erzeugung des Werts:
+README.md, Abschnitt "Peer-Public-Key-Allowlist". Plant das bei der
+Migration mit ein — ein Produkt, das den Peer-Key bisher zur Laufzeit
+selbst bestimmt hat, braucht hier einen Config-Eintrag pro verwendetem
+Peer-Key.
 
 Ein vollständiges, lauffähiges Python-Beispiel liegt in
 `examples/local_client_example.py`.

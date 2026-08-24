@@ -31,11 +31,17 @@ pub enum Request {
     /// exakt den IV, der beim Encrypt verwendet wurde — der Server
     /// generiert ihn pro Encrypt-Aufruf frisch und gibt ihn deshalb mit
     /// zurück, statt ihn implizit/fest anzunehmen).
+    /// `integrity_b64`: die Signatur aus der zugehörigen
+    /// `encrypt`-Antwort. Wird **vor** dem Entschlüsseln geprüft — AES-CBC
+    /// allein bietet keinen Integritätsschutz, ohne diese Prüfung wäre
+    /// jeder Ciphertext unbemerkt manipulierbar (und der Decrypt-Pfad ein
+    /// Padding-Orakel).
     Decrypt {
         key_label: String,
         mechanism: String,
         data_b64: String,
         iv_b64: String,
+        integrity_b64: String,
     },
     /// Leitet aus `key_label` einen Key ab und verschlüsselt `data_b64`
     /// damit, atomar in einer HSM-Session (siehe hsm.rs für die
@@ -54,7 +60,7 @@ pub enum Request {
         peer_public_key_b64: String,
         data_b64: String,
     },
-    /// `iv_b64`: der IV aus der `iv_b64` der zugehörigen
+    /// `iv_b64` und `integrity_b64`: aus der zugehörigen
     /// `derive_and_encrypt`-Antwort (siehe `Decrypt`).
     DeriveAndDecrypt {
         key_label: String,
@@ -62,6 +68,7 @@ pub enum Request {
         target_mechanism: String,
         peer_public_key_b64: String,
         iv_b64: String,
+        integrity_b64: String,
         data_b64: String,
     },
 }
@@ -73,9 +80,33 @@ impl Request {
             Request::Verify { .. } => Operation::Verify,
             Request::Encrypt { .. } => Operation::Encrypt,
             Request::Decrypt { .. } => Operation::Decrypt,
-            Request::DeriveAndEncrypt { .. } | Request::DeriveAndDecrypt { .. } => {
-                Operation::Derive
+            Request::DeriveAndEncrypt { .. } => Operation::DeriveAndEncrypt,
+            Request::DeriveAndDecrypt { .. } => Operation::DeriveAndDecrypt,
+        }
+    }
+
+    /// `Some` nur bei den Derive-Varianten. Der Wert unterliegt einer
+    /// eigenen Autorisierungsstufe (`AuthzTable::is_peer_key_authorized`),
+    /// siehe die Begründung an `PermissionEntry::peer_public_keys`.
+    pub fn peer_public_key_b64(&self) -> Option<&str> {
+        match self {
+            Request::DeriveAndEncrypt { peer_public_key_b64, .. }
+            | Request::DeriveAndDecrypt { peer_public_key_b64, .. } => Some(peer_public_key_b64),
+            _ => None,
+        }
+    }
+
+    /// Die Eingaben der Integritätsprüfung `(iv_b64, integrity_b64,
+    /// data_b64)` — `Some` nur bei den Decrypt-Varianten. Wird in
+    /// `server.rs::process_line` geprüft, bevor das HSM überhaupt
+    /// entschlüsselt.
+    pub fn integrity_input(&self) -> Option<(&str, &str, &str)> {
+        match self {
+            Request::Decrypt { iv_b64, integrity_b64, data_b64, .. }
+            | Request::DeriveAndDecrypt { iv_b64, integrity_b64, data_b64, .. } => {
+                Some((iv_b64, integrity_b64, data_b64))
             }
+            _ => None,
         }
     }
 
@@ -98,10 +129,16 @@ pub enum Response {
     /// gesetzt — der frisch generierte IV dieser einen Operation, muss
     /// vom Aufrufer für den passenden `decrypt`/`derive_and_decrypt`-
     /// Aufruf aufbewahrt und mitgeschickt werden.
+    ///
+    /// `integrity_b64`: ebenfalls nur bei den Encrypt-Varianten — die
+    /// Signatur über Key-Label, IV und Ciphertext (Encrypt-then-Sign).
+    /// Zusammen mit `iv_b64` aufbewahren; ohne sie lässt sich der
+    /// Ciphertext später nicht mehr entschlüsseln.
     Ok {
         result_b64: Option<String>,
         verified: Option<bool>,
         iv_b64: Option<String>,
+        integrity_b64: Option<String>,
     },
     Denied { reason: String },
     Error { message: String },

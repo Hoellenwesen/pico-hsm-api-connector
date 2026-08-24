@@ -17,7 +17,13 @@ pub struct AuditEntry {
     pub client_cn: String,
     pub operation: String,
     pub key_label: String,
-    pub status: String, // "authorized" | "denied" | "hsm_error"
+    /// "intent" (vor Ausführung) | "authorized" | "denied" | "hsm_error"
+    /// | "cert_policy_violation" | "cert_expiring_soon"
+    ///
+    /// Zu jedem "intent" muss ein "authorized" oder "hsm_error" mit
+    /// gleichem Client/Key folgen — fehlt er, wurde die Operation
+    /// abgebrochen (Absturz, Stromausfall) und der Ausgang ist unbekannt.
+    pub status: String,
     pub detail: Option<String>,
     pub prev_hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -26,18 +32,27 @@ pub struct AuditEntry {
 
 pub struct AuditLog {
     path: PathBuf,
-    lock: Mutex<()>,
+    /// Cache des zuletzt geschriebenen `entry_hash`; `None` = noch nicht
+    /// aus der Datei gelesen. Dient zugleich als Schreib-Lock.
+    ///
+    /// Ohne Cache müsste `append` die komplette Datei neu einlesen, um
+    /// den Vorgänger-Hash zu bestimmen — bei zwei Einträgen pro Request
+    /// (intent + outcome) wäre das quadratisches Wachstum. Setzt voraus,
+    /// dass nur dieser Prozess schreibt; das ist ohnehin schon die
+    /// Annahme hinter dem Mutex (ein zweiter Schreiber würde die Kette
+    /// auch beim Neu-Einlesen zerreißen).
+    last_hash: Mutex<Option<String>>,
 }
 
 impl AuditLog {
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,
-            lock: Mutex::new(()),
+            last_hash: Mutex::new(None),
         }
     }
 
-    fn last_hash(&self) -> anyhow::Result<String> {
+    fn last_hash_from_file(&self) -> anyhow::Result<String> {
         if !self.path.exists() {
             return Ok("0".repeat(64));
         }
@@ -57,8 +72,8 @@ impl AuditLog {
 
     /// Schreibt einen Eintrag. Nie fehlschlagen lassen, ohne dass der
     /// Aufrufer es merkt — ein Audit-Log, das still versagt, ist
-    /// schlimmer als keins. Der Aufrufer (siehe server.rs) behandelt
-    /// einen Fehler hier als Grund, die angefragte Operation
+    /// schlimmer als keins. Der Aufrufer (siehe `server.rs::audit`)
+    /// behandelt einen Fehler hier als Grund, die angefragte Operation
     /// abzulehnen, statt sie unprotokolliert durchzuwinken.
     pub fn append(
         &self,
@@ -68,8 +83,20 @@ impl AuditLog {
         status: &str,
         detail: Option<String>,
     ) -> anyhow::Result<()> {
-        let _guard = self.lock.lock().unwrap();
-        let prev_hash = self.last_hash()?;
+        // Ein vergifteter Mutex heisst: ein frueherer Schreibvorgang ist
+        // mitten drin gepanict. Dann ist der gecachte Hash-Zustand nicht
+        // mehr vertrauenswuerdig -> Fehler melden, nicht weiterschreiben.
+        let mut cached = self.last_hash.lock().map_err(|_| {
+            anyhow::anyhow!(
+                "Audit-Mutex vergiftet (frueherer Panic beim Schreiben) — \
+                 Kettenzustand unklar, Dienst neu starten"
+            )
+        })?;
+
+        let prev_hash = match cached.as_ref() {
+            Some(hash) => hash.clone(),
+            None => self.last_hash_from_file()?,
+        };
 
         let mut entry = AuditEntry {
             timestamp: chrono::Utc::now(),
@@ -86,7 +113,7 @@ impl AuditLog {
         // Python-Pendant (sort_keys + kompaktes JSON für Determinismus).
         let payload = serde_json::to_string(&SerializeForHash::from(&entry))?;
         let hash = format!("{:x}", Sha256::digest(payload.as_bytes()));
-        entry.entry_hash = Some(hash);
+        entry.entry_hash = Some(hash.clone());
 
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -96,6 +123,15 @@ impl AuditLog {
             .append(true)
             .open(&self.path)?;
         writeln!(file, "{}", serde_json::to_string(&entry)?)?;
+        // Erst nach fsync gilt der Eintrag als geschrieben: der Aufrufer
+        // laesst auf ein Ok() hin eine HSM-Operation zu, das darf nicht
+        // auf noch ungeschriebenem Page-Cache beruhen.
+        file.sync_all()?;
+
+        // Cache erst nach erfolgreichem Schreiben fortschreiben — sonst
+        // wuerde ein fehlgeschlagener Write die Kette dauerhaft
+        // verschieben.
+        *cached = Some(hash);
         Ok(())
     }
 

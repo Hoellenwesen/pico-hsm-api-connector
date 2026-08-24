@@ -41,6 +41,7 @@ struct EnvConfig {
     pkcs11_module: PathBuf,
     hsm_pin: String,
     audit_log: PathBuf,
+    integrity_key_label: String,
     max_client_cert_validity_days: i64,
     cert_expiry_warn_days: i64,
 }
@@ -66,6 +67,11 @@ fn load_env() -> Result<EnvConfig> {
         clients_config: var("GATEWAY_CLIENTS_CONFIG")?.into(),
         pkcs11_module: var("GATEWAY_PKCS11_MODULE")?.into(),
         hsm_pin: var("GATEWAY_HSM_PIN")?,
+        // Bewusst Pflicht ohne Default: AES-CBC hat keinen
+        // Integritaetsschutz, ohne Encrypt-then-Sign waeren alle
+        // Ciphertexts unbemerkt manipulierbar. Ein optionaler Schalter
+        // waere ein Fail-Open-Pfad, den niemand bemerkt.
+        integrity_key_label: var("GATEWAY_INTEGRITY_KEY_LABEL")?,
         audit_log: std::env::var("GATEWAY_AUDIT_LOG")
             .unwrap_or_else(|_| "/var/log/hsm-api-gateway/audit.jsonl".into())
             .into(),
@@ -111,6 +117,23 @@ async fn main() -> Result<()> {
     let authz = AuthzTable::load_from_file(&env.clients_config)?;
     tracing::info!("Autorisierungs-Config geladen aus {:?}", env.clients_config);
 
+    // Der Integritaetsschluessel ist gateway-intern. Waere er einem
+    // Client freigegeben, koennte dieser ueber die regulaere
+    // `sign`-Operation beliebige Integritaets-Signaturen erzeugen und
+    // damit manipulierte Ciphertexts als echt ausgeben.
+    if authz.mentions_key_label(&env.integrity_key_label) {
+        anyhow::bail!(
+            "GATEWAY_INTEGRITY_KEY_LABEL ('{}') ist in {:?} einem Client \
+             freigegeben. Dieser Schluessel ist ausschliesslich fuer die \
+             Integritaets-Signaturen des Gateways bestimmt — ein Client mit \
+             Zugriff darauf koennte manipulierte Ciphertexts selbst signieren. \
+             Entweder den Client-Eintrag entfernen oder einen eigenen, \
+             separaten Key fuer die Integritaetssicherung anlegen.",
+            env.integrity_key_label,
+            env.clients_config
+        );
+    }
+
     let hsm = HsmClient::connect(&env.pkcs11_module, env.hsm_pin)?;
     tracing::info!("PKCS#11-Verbindung zum HSM hergestellt");
 
@@ -131,6 +154,7 @@ async fn main() -> Result<()> {
             max_validity: chrono::Duration::days(env.max_client_cert_validity_days),
             warn_before_expiry: chrono::Duration::days(env.cert_expiry_warn_days),
         },
+        integrity_key_label: env.integrity_key_label,
     });
 
     server::run(&env.listen_addr, acceptor, state).await

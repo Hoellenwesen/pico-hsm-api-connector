@@ -112,10 +112,17 @@ class GatewayClient:
         )
         return bool(resp["verified"])
 
-    def encrypt(self, key_label: str, data: bytes, mechanism: str = "aes_cbc_pad") -> tuple[bytes, bytes]:
-        """Gibt (ciphertext, iv) zurueck. Der IV wird vom Gateway pro
-        Aufruf frisch generiert (kein fester/Null-IV mehr) und muss fuer
-        den passenden decrypt()-Aufruf aufbewahrt werden."""
+    def encrypt(
+        self, key_label: str, data: bytes, mechanism: str = "aes_cbc_pad"
+    ) -> tuple[bytes, bytes, bytes]:
+        """Gibt (ciphertext, iv, integrity) zurueck.
+
+        Der IV wird vom Gateway pro Aufruf frisch generiert (kein
+        fester/Null-IV mehr). `integrity` ist die Encrypt-then-Sign-
+        Signatur ueber Key-Label, IV und Ciphertext.
+
+        ALLE DREI Werte zusammen aufbewahren — ohne iv und integrity
+        laesst sich der Ciphertext nicht mehr entschluesseln."""
         resp = self._call(
             {
                 "op": "encrypt",
@@ -124,13 +131,24 @@ class GatewayClient:
                 "data_b64": self._b64(data),
             }
         )
-        return self._unb64(resp["result_b64"]), self._unb64(resp["iv_b64"])
+        return (
+            self._unb64(resp["result_b64"]),
+            self._unb64(resp["iv_b64"]),
+            self._unb64(resp["integrity_b64"]),
+        )
 
     def decrypt(
-        self, key_label: str, data: bytes, iv: bytes, mechanism: str = "aes_cbc_pad"
+        self,
+        key_label: str,
+        data: bytes,
+        iv: bytes,
+        integrity: bytes,
+        mechanism: str = "aes_cbc_pad",
     ) -> bytes:
-        """`iv` muss der IV sein, der vom passenden encrypt()-Aufruf
-        zurückgegeben wurde."""
+        """`iv` und `integrity` muessen aus dem passenden
+        encrypt()-Aufruf stammen. Das Gateway prueft die Signatur, bevor
+        es ueberhaupt entschluesselt — bei Manipulation kommt
+        "status":"denied" zurueck und es wird nichts entschluesselt."""
         resp = self._call(
             {
                 "op": "decrypt",
@@ -138,6 +156,7 @@ class GatewayClient:
                 "mechanism": mechanism,
                 "data_b64": self._b64(data),
                 "iv_b64": self._b64(iv),
+                "integrity_b64": self._b64(integrity),
             }
         )
         return self._unb64(resp["result_b64"])
@@ -149,12 +168,16 @@ class GatewayClient:
         peer_public_key: bytes,
         derive_mechanism: str = "ecdh1_derive",
         target_mechanism: str = "aes_cbc_pad",
-    ) -> tuple[bytes, bytes]:
+    ) -> tuple[bytes, bytes, bytes]:
         """Ersatz für das bisherige WrapKey des Python-Daemons — Ableitung
         und Verschlüsselung passieren atomar in einer HSM-Session, siehe
-        MIGRATION.md. `peer_public_key` ist der Public Key der Gegenseite
-        für ECDH1_DERIVE (Pflicht — ohne ihn kein Shared Secret).
-        Gibt (ciphertext, iv) zurück, analog zu encrypt()."""
+        MIGRATION.md.
+
+        `peer_public_key` ist der Public Key der Gegenseite für
+        ECDH1_DERIVE. Pflicht — und er muss in clients.yaml unter
+        peer_public_keys freigegeben sein, sonst kommt "denied" zurueck.
+
+        Gibt (ciphertext, iv, integrity) zurück, analog zu encrypt()."""
         resp = self._call(
             {
                 "op": "derive_and_encrypt",
@@ -165,7 +188,11 @@ class GatewayClient:
                 "data_b64": self._b64(plaintext),
             }
         )
-        return self._unb64(resp["result_b64"]), self._unb64(resp["iv_b64"])
+        return (
+            self._unb64(resp["result_b64"]),
+            self._unb64(resp["iv_b64"]),
+            self._unb64(resp["integrity_b64"]),
+        )
 
     def derive_and_decrypt(
         self,
@@ -173,11 +200,17 @@ class GatewayClient:
         ciphertext: bytes,
         peer_public_key: bytes,
         iv: bytes,
+        integrity: bytes,
         derive_mechanism: str = "ecdh1_derive",
         target_mechanism: str = "aes_cbc_pad",
     ) -> bytes:
-        """Ersatz für das bisherige UnwrapKey des Python-Daemons. `iv`
-        muss der IV aus der passenden derive_and_encrypt()-Antwort sein."""
+        """Ersatz für das bisherige UnwrapKey des Python-Daemons. `iv` und
+        `integrity` muessen aus der passenden derive_and_encrypt()-Antwort
+        stammen.
+
+        Hinweis: derive_and_encrypt und derive_and_decrypt sind getrennte
+        Permissions — ein Client, der nur wrappen soll, bekommt fuer
+        diesen Aufruf bewusst "denied"."""
         resp = self._call(
             {
                 "op": "derive_and_decrypt",
@@ -186,6 +219,7 @@ class GatewayClient:
                 "target_mechanism": target_mechanism,
                 "peer_public_key_b64": self._b64(peer_public_key),
                 "iv_b64": self._b64(iv),
+                "integrity_b64": self._b64(integrity),
                 "data_b64": self._b64(ciphertext),
             }
         )
@@ -215,12 +249,30 @@ def main():
     )
 
     payload = b"Beispiel-Nutzdaten"
-    ciphertext, iv = client.encrypt(key_label=args.key_label, data=payload)
+    ciphertext, iv, integrity = client.encrypt(key_label=args.key_label, data=payload)
     print(f"Verschlüsselt, {len(ciphertext)} Bytes, IV: {iv.hex()}")
 
-    plaintext = client.decrypt(key_label=args.key_label, data=ciphertext, iv=iv)
+    plaintext = client.decrypt(
+        key_label=args.key_label, data=ciphertext, iv=iv, integrity=integrity
+    )
     assert plaintext == payload, "Encrypt/Decrypt-Roundtrip fehlgeschlagen!"
     print("✓ Encrypt/Decrypt-Roundtrip erfolgreich")
+
+    # Gegenprobe: ein manipulierter Ciphertext muss abgelehnt werden,
+    # bevor ueberhaupt entschluesselt wird.
+    tampered = bytearray(ciphertext)
+    tampered[0] ^= 0x01
+    try:
+        client.decrypt(
+            key_label=args.key_label,
+            data=bytes(tampered),
+            iv=iv,
+            integrity=integrity,
+        )
+    except GatewayError:
+        print("✓ Manipulierter Ciphertext wurde abgelehnt")
+    else:
+        raise SystemExit("FEHLER: manipulierter Ciphertext wurde akzeptiert!")
 
 
 if __name__ == "__main__":

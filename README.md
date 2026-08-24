@@ -54,12 +54,20 @@ Beispiel-Request:
 ```
 
 Bei AES-Operationen (`encrypt`, `decrypt`, `derive_and_encrypt`, `derive_and_decrypt`)
-generiert das Gateway den IV pro `encrypt`/`derive_and_encrypt`-Aufruf frisch
-und liefert ihn in der Antwort (`iv_b64`) zurück — der Aufrufer muss ihn
-für den passenden `decrypt`/`derive_and_decrypt`-Aufruf mitschicken. Bei
+liefert die Antwort neben `result_b64` zwei weitere Felder, die der
+Aufrufer zusammen mit dem Ciphertext aufbewahren und beim Entschlüsseln
+mitschicken muss:
+
+- `iv_b64` — der pro Verschlüsselung frisch generierte AES-CBC-IV
+- `integrity_b64` — die Encrypt-then-Sign-Signatur über Key-Label, IV
+  und Ciphertext (siehe "Integritätsschutz" unten)
+
+Ohne beide Werte lässt sich ein Ciphertext nicht mehr entschlüsseln. Bei
 `derive_and_encrypt`/`derive_and_decrypt` ist zusätzlich `peer_public_key_b64`
 Pflicht (Public Key der Gegenseite für `ECDH1_DERIVE` — ohne ihn lässt sich
-kein Shared Secret berechnen):
+kein Shared Secret berechnen). **Dieser Wert muss vorab in `clients.yaml`
+unter `peer_public_keys` freigegeben sein** — siehe
+"Peer-Public-Key-Allowlist" unten:
 
 ```json
 {"op": "derive_and_encrypt", "key_label": "app-c-derive-key", "derive_mechanism": "ecdh1_derive", "target_mechanism": "aes_cbc_pad", "peer_public_key_b64": "<Public Key der Gegenseite>", "data_b64": "..."}
@@ -84,6 +92,11 @@ export GATEWAY_CLIENTS_CONFIG=/etc/hsm-gateway/clients.yaml
 export GATEWAY_PKCS11_MODULE=/usr/lib/libsc-hsm-pkcs11.so
 export GATEWAY_HSM_PIN="<aus Vaultwarden zur Laufzeit injizieren>"
 export GATEWAY_AUDIT_LOG=/var/log/hsm-api-gateway/audit.jsonl
+# Dedizierter ECDSA-Key fuer die Integritaets-Signaturen
+# (Encrypt-then-Sign, siehe Abschnitt unten). Pflicht, kein Default —
+# darf keinem Client in clients.yaml freigegeben sein, das prueft das
+# Gateway beim Start.
+export GATEWAY_INTEGRITY_KEY_LABEL=gateway-integrity-key
 # Zertifikats-Lebensdauer-Policy (docs/11-Ergänzung, Punkt 4) — optional,
 # Defaults: max. 90 Tage Gültigkeit, Warnung ab 14 Tagen vor Ablauf
 export GATEWAY_MAX_CLIENT_CERT_VALIDITY_DAYS=90
@@ -94,6 +107,95 @@ cargo run --release
 
 `config/clients.yaml` nach dem Muster in `config/clients.example.yaml`
 befüllen — siehe Kommentare dort zum Default-Deny-Prinzip.
+
+## Integritätsschutz (Encrypt-then-Sign)
+
+AES-CBC bietet **keinen** Integritätsschutz: Ein Angreifer, der an einen
+gespeicherten Ciphertext kommt (Dateisystem, Backup, Message Queue),
+kann ihn gezielt verändern, ohne dass die Entschlüsselung das bemerkt —
+bei CBC lässt sich über Bit-Flips im Vorgängerblock der Klartext
+manipulieren, und da der IV beim Entschlüsseln mitgegeben wird, sogar der
+komplette erste Block.
+
+Das Gateway signiert deshalb bei jeder Verschlüsselung Key-Label, IV und
+Ciphertext mit einem dedizierten ECDSA-Key im HSM und prüft diese
+Signatur beim Entschlüsseln, **bevor** überhaupt entschlüsselt wird.
+Nebeneffekt: Der Decrypt-Pfad ist damit kein Padding-Orakel mehr, weil
+manipulierte Daten die PKCS#7-Padding-Prüfung im HSM gar nicht erreichen.
+
+Schlüssel anlegen (eigener Key, nicht einer der Anwendungsschlüssel):
+
+```bash
+pkcs11-tool --module /usr/lib/libsc-hsm-pkcs11.so --login --pin <PIN> \
+    --keypairgen --key-type EC:secp256r1 --label "gateway-integrity-key"
+```
+
+Dann `GATEWAY_INTEGRITY_KEY_LABEL=gateway-integrity-key` setzen.
+
+**Dieser Key darf in `clients.yaml` nicht auftauchen.** Hätte ein Client
+ihn für `sign` freigegeben, könnte er beliebige Integritäts-Signaturen
+selbst erzeugen und manipulierte Ciphertexts als echt ausgeben — der
+Schutz wäre wertlos. Das Gateway lehnt den Start ab, wenn das Label in
+der Autorisierungs-Config vorkommt.
+
+Signiert wird eine kanonische, längenpräfixierte Kodierung
+(`server.rs::integrity_payload`): Domain-Separator, Key-Label, IV und
+Ciphertext, jeweils mit vorangestellter Länge. Ohne diese Präfixe
+liessen sich Feldgrenzen verschieben und eine Signatur auf einen anderen
+Inhalt umdeuten; das mitsignierte Key-Label verhindert, dass ein
+Ciphertext unter einem anderen Schlüssel wiedereingespielt wird.
+
+**Kosten:** eine zusätzliche HSM-Operation pro Ver-/Entschlüsselung.
+
+## Peer-Public-Key-Allowlist (Pflicht für `derive`)
+
+Für `derive_and_encrypt`/`derive_and_decrypt` muss jeder zulässige
+Public Key der Gegenseite vorab in `clients.yaml` hinterlegt werden:
+
+```yaml
+- operation: derive_and_encrypt      # bzw. derive_and_decrypt
+  key_labels: ["app-c-derive-key"]
+  peer_public_keys:
+    - "<base64 des Peer-Public-Keys>"
+```
+
+Wrappen und Entwrappen sind dabei **getrennte Operationen**
+(`derive_and_encrypt` / `derive_and_decrypt`): Ein Client, der
+Schlüsselmaterial nur einpacken soll, bekommt daraus kein Recht, es
+wieder auszupacken. Beide brauchen jeweils eigene `peer_public_keys`.
+
+Wert erzeugen (dieselben Bytes, die auch `pkcs11-tool --derive -i <datei>`
+bekäme):
+
+```bash
+openssl ec -in peer.pem -pubout -outform DER | base64 -w0
+```
+
+**Warum das keine optionale Härtung, sondern zwingend ist:** ECDH ist
+symmetrisch — es gilt `d_hsm · Q_client == d_client · Q_hsm`. Dürfte ein
+Client den Peer-Key frei wählen, könnte er ein eigenes Keypair erzeugen,
+den abgeleiteten AES-Key mit seinem eigenen privaten Schlüssel und dem
+(öffentlichen) HSM-Public-Key selbst nachrechnen und das "hardware-
+geschützte" Wrapping damit offline aufbrechen. Zusätzlich ließe sich über
+wiederholte Anfragen mit Punkten kleiner Ordnung ein Invalid-Curve-Angriff
+fahren und der private Schlüssel aus dem HSM rekonstruieren
+(NIST SP 800-56A Rev. 3, §5.6.2.3.2).
+
+Das Gateway erzwingt die Allowlist an zwei Stellen:
+
+- **Beim Laden der Config**: ein `derive`-Eintrag ohne
+  `peer_public_keys` ist ein harter Startfehler (kein impliziter
+  Wildcard). `peer_public_keys` bei anderen Operationen wird ebenfalls
+  abgelehnt, weil es dort wirkungslos und damit irreführend wäre.
+- **Pro Request**: ein nicht freigegebener Peer-Key führt zu
+  `"status":"denied"` und einem Audit-Eintrag mit dem SHA-256-Fingerprint
+  des versuchten Keys — der Angriff ist damit nachweisbar, nicht nur
+  blockiert.
+
+Jeder Eintrag muss vom Betreiber geprüft sein: dass der Punkt auf der
+erwarteten Kurve liegt und tatsächlich zur vorgesehenen Gegenstelle
+gehört. Das Gateway prüft die Kurvenzugehörigkeit selbst **nicht** — es
+verlässt sich darauf, dass nur geprüfte Keys in der Allowlist stehen.
 
 **Für den Betrieb mit echter Pico-HSM-Hardware und den kompletten
 Zertifikats-Rotations-Ablauf (Client-Zertifikate, Server-Zertifikat,
@@ -188,6 +290,11 @@ pkcs11-tool --module /usr/lib/softhsm/libsofthsm2.so --login --pin 648219 \
 # EC-Key für sign/verify-Tests
 pkcs11-tool --module /usr/lib/softhsm/libsofthsm2.so --login --pin 648219 \
     --keypairgen --key-type EC:secp256r1 --label "app-b-signing-key"
+
+# EC-Key für die Integritäts-Signaturen des Gateways (Encrypt-then-Sign).
+# Bewusst ein eigener Key — er darf keinem Client freigegeben sein.
+pkcs11-tool --module /usr/lib/softhsm/libsofthsm2.so --login --pin 648219 \
+    --keypairgen --key-type EC:secp256r1 --label "gateway-integrity-key"
 ```
 
 Für den Gateway-Start dann `GATEWAY_PKCS11_MODULE=/usr/lib/softhsm/libsofthsm2.so`
@@ -238,6 +345,7 @@ export GATEWAY_CLIENTS_CONFIG=config/clients.example.yaml
 export GATEWAY_PKCS11_MODULE=/usr/lib/softhsm/libsofthsm2.so
 export GATEWAY_HSM_PIN=648219
 export GATEWAY_AUDIT_LOG=/tmp/hsm-gateway-audit.jsonl
+export GATEWAY_INTEGRITY_KEY_LABEL=gateway-integrity-key
 RUST_LOG=debug cargo run --release
 ```
 
@@ -249,13 +357,25 @@ openssl s_client -connect 127.0.0.1:8443 \
     -quiet
 ```
 
-Erwartete Antwort: eine Zeile JSON mit `"status":"ok"`, `result_b64` und
-zusätzlich `iv_b64` (der pro Aufruf frisch generierte AES-CBC-IV, siehe
-"Wire-Format" oben — für den passenden `decrypt`-Aufruf muss dieser
-`iv_b64`-Wert mitgeschickt werden, sonst lässt sich der Ciphertext nicht
-entschlüsseln).
-Danach `/tmp/hsm-gateway-audit.jsonl` ansehen — dort sollte ein
-`authorized`-Eintrag für `app-a.internal.example` stehen.
+Erwartete Antwort: eine Zeile JSON mit `"status":"ok"`, `result_b64`
+sowie `iv_b64` und `integrity_b64`. Beide Zusatzfelder müssen beim
+passenden `decrypt`-Aufruf mitgeschickt werden, sonst lässt sich der
+Ciphertext nicht entschlüsseln. Ein bequemerer Weg als `openssl
+s_client` für den kompletten Roundtrip inklusive Manipulations-Gegenprobe:
+`python3 examples/local_client_example.py` (siehe Kopf der Datei).
+Danach `/tmp/hsm-gateway-audit.jsonl` ansehen — dort sollten **zwei**
+Einträge für `app-a.internal.example` stehen: erst `intent` (vor dem
+HSM-Zugriff geschrieben), dann `authorized`. Ein `intent` ohne
+zugehörigen Abschluss-Eintrag bedeutet, dass die Operation abgebrochen
+wurde und ihr Ausgang unbekannt ist — genau dafür ist die zweiphasige
+Protokollierung da.
+
+Das Audit-Log ist **fail-closed**: Lässt sich ein Eintrag nicht
+schreiben (Rechte, volles Dateisystem, read-only Mount), lehnt das
+Gateway die Anfrage ab, statt sie unprotokolliert auszuführen. Zum
+Nachstellen: Audit-Datei auf `chmod 000` setzen und eine Anfrage
+schicken — erwartet wird `"status":"error"` mit Hinweis auf das
+Audit-Log, keine HSM-Operation.
 
 Ein Aufruf mit einem Key-Label, das laut `clients.example.yaml` für
 diesen Client *nicht* freigegeben ist (z. B. `app-b-signing-key`), sollte
@@ -314,7 +434,24 @@ Sandbox weder ein PKCS#11-Modul noch ein angeschlossenes Board:
    `pico-hsm`-Firmware (insbesondere `ECDH1_DERIVE`-Parameter/Verhalten
    können abweichen). Ein erfolgreicher SoftHSM2-Testlauf ersetzt nicht
    den Testlauf gegen das echte Board — nur den ersten, schnelleren
-7. **AES braucht `libsc-hsm-pkcs11.so`, nicht `opensc-pkcs11.so`.**
+7. **Offene Findings aus dem Security-Review.** Behoben sind beide
+   HIGH-Findings (frei wählbarer ECDH-Peer-Key → Hardware-Bindung
+   wirkungslos + Invalid-Curve-Angriff, via Peer-Public-Key-Allowlist),
+   der fehlende Integritätsschutz (Encrypt-then-Sign), das Fail-Open
+   beim Audit-Log, die fehlende Trennung von Wrap/Unwrap sowie der
+   fehlende `CKA_CLASS`-Filter. **Noch offen:**
+   - **Keine KDF über dem ECDH-Shared-Secret** (`EcKdf::null()`) —
+     nicht NIST-SP-800-56A-§5.8-konform. `cryptoki` 0.7 kennt nur
+     `null()`; ein Upgrade auf 0.12 (nur zwei mechanische Anpassungen
+     in `hsm.rs`: `CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)`
+     und `AuthPin::new(Box<str>)`) brächte `EcKdf::sha256()`. Zwei
+     ungeprüfte Punkte bleiben: ob `sc-hsm-embedded` `CKD_SHA256_KDF`
+     überhaupt umsetzt (die Firmware liefert in
+     `cmd_decrypt_asym.c:141` das rohe Secret, die KDF müsste das
+     Host-Modul machen), und dass `EcKdf::sha256()` zwingend
+     `shared_data` verlangt — ein leerer Slice erzeugt einen
+     Non-NULL-Pointer bei Länge 0, was PKCS#11-widrig ist.
+8. **AES braucht `libsc-hsm-pkcs11.so`, nicht `opensc-pkcs11.so`.**
    Laut `pico-hsm/doc/aes.md` unterstützt OpenSCs sc-hsm-Treiber kein
    AES für das Pico HSM — nur das `sc-hsm-embedded`-Modul
    (`libsc-hsm-pkcs11.so`) tut das. Da `encrypt`/`decrypt` und beide

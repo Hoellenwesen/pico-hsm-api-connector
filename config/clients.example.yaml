@@ -30,5 +30,30 @@ clients:
   - cn: "app-c.internal.example"
     description: "Beispiel: Key-Derivation fuer ein einzelnes Wrapping-Szenario"
     permissions:
-      - operation: derive
+      # Wrappen und Entwrappen sind getrennte Operationen. Ein Client, der
+      # Schluesselmaterial nur einpacken soll, bekommt nur
+      # derive_and_encrypt — das Gegenstueck hier bewusst weglassen.
+      - operation: derive_and_encrypt
         key_labels: ["app-c-derive-key"]
+        # SICHERHEITSKRITISCH und deshalb Pflicht bei beiden
+        # derive_and_*-Operationen: Nur diese
+        # Public Keys der Gegenseite duerfen fuer ECDH1_DERIVE verwendet
+        # werden. Ein frei waehlbarer Peer-Key waere fatal — ECDH ist
+        # symmetrisch, der Client koennte den abgeleiteten Wrapping-Key
+        # selbst nachrechnen (Hardware-Bindung wertlos) und ueber
+        # Invalid-Curve-Anfragen den privaten Schluessel aus dem HSM
+        # rekonstruieren.
+        #
+        # Wert erzeugen (Public Key der Gegenseite, gleiche Bytes wie fuer
+        # `pkcs11-tool --derive -i <datei>`):
+        #   openssl ec -in peer.pem -pubout -outform DER | base64 -w0
+        #
+        # Jeder Eintrag muss vom Betreiber geprueft sein: dass er auf der
+        # erwarteten Kurve liegt und tatsaechlich zur vorgesehenen
+        # Gegenstelle gehoert.
+        # Platzhalter (dekodiert zu "REPLACE-WITH-REAL-PEER-PUBLIC-KEY").
+        # Bewusst gueltiges Base64, damit diese Beispieldatei fuer den
+        # Quickstart in README.md Abschnitt 5 ladbar bleibt — mit diesem
+        # Wert schlaegt jeder echte derive-Aufruf fehl, was gewollt ist.
+        peer_public_keys:
+          - "UkVQTEFDRS1XSVRILVJFQUwtUEVFUi1QVUJMSUMtS0VZ"

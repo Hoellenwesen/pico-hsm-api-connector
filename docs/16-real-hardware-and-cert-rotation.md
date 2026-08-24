@@ -40,6 +40,23 @@ export GATEWAY_PKCS11_MODULE=/usr/lib/libsc-hsm-pkcs11.so
 export GATEWAY_HSM_PIN="<eure echte User-PIN, aus Vaultwarden>"
 ```
 
+Zusätzlich braucht das Gateway auf dem echten Board den
+**Integritäts-Schlüssel** für Encrypt-then-Sign (README.md, Abschnitt
+"Integritätsschutz") — ein eigener EC-Keypair, der keinem Client
+freigegeben sein darf:
+
+```bash
+pkcs11-tool --module /usr/lib/libsc-hsm-pkcs11.so --login --pin <PIN> \
+    --keypairgen --key-type EC:secp256r1 --label "gateway-integrity-key"
+```
+
+Wichtig für die Rotation: Wird dieser Key ersetzt, lassen sich **alle
+bereits verschlüsselten Daten nicht mehr entschlüsseln**, weil ihre
+Integritäts-Signaturen nicht mehr verifizierbar sind. Er gehört damit in
+dieselbe Kategorie wie die Anwendungsschlüssel (Backup nach
+`scripts/backup-*.sh`), nicht zu den routinemäßig rotierten
+Zertifikaten.
+
 Die auf dem HSM benötigten Keys (`shared-encryption-key`,
 `app-b-signing-key` o. ä., je nach eurer `clients.yaml`) müsst ihr — falls
 noch nicht vorhanden — genauso mit `pkcs11-tool` gegen das echte Board
@@ -67,6 +84,7 @@ export GATEWAY_CLIENTS_CONFIG=/etc/hsm-gateway/clients.yaml
 export GATEWAY_PKCS11_MODULE=/usr/lib/libsc-hsm-pkcs11.so
 export GATEWAY_HSM_PIN="<aus Vaultwarden>"
 export GATEWAY_AUDIT_LOG=/var/log/hsm-api-gateway/audit.jsonl
+export GATEWAY_INTEGRITY_KEY_LABEL=gateway-integrity-key
 export GATEWAY_MAX_CLIENT_CERT_VALIDITY_DAYS=90
 export GATEWAY_CERT_EXPIRY_WARN_DAYS=14
 

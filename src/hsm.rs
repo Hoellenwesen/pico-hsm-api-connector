@@ -19,7 +19,7 @@
 use anyhow::{anyhow, Context, Result};
 use cryptoki::context::{CInitializeArgs, Pkcs11};
 use cryptoki::mechanism::Mechanism;
-use cryptoki::object::{Attribute, ObjectHandle};
+use cryptoki::object::{Attribute, ObjectClass, ObjectHandle};
 use cryptoki::session::{Session, UserType};
 use cryptoki::slot::Slot;
 use cryptoki::types::AuthPin;
@@ -59,25 +59,44 @@ impl HsmClient {
         Ok(session)
     }
 
-    /// Findet genau EIN Objekt mit dem gegebenen Label. Mehrdeutigkeit
-    /// (0 oder >1 Treffer) ist ein Fehler — wir wollen nie erraten,
-    /// welcher Key gemeint war.
-    fn find_key_by_label(&self, session: &Session, label: &str) -> Result<ObjectHandle> {
-        let template = vec![Attribute::Label(label.as_bytes().to_vec())];
+    /// Findet genau EIN Objekt mit dem gegebenen Label **und** der
+    /// gegebenen Objektklasse. Mehrdeutigkeit (0 oder >1 Treffer) ist ein
+    /// Fehler — wir wollen nie erraten, welcher Key gemeint war.
+    ///
+    /// Die Klasse gehoert zwingend ins Template: `pkcs11-tool
+    /// --keypairgen --label "X"` legt Private- **und** Public-Key-Objekt
+    /// mit demselben Label an (siehe pico-hsm/doc/usage.md). Ohne
+    /// Klassenfilter liefert die Suche dann zwei Treffer und bricht ab —
+    /// sign/verify/derive waeren gegen echte Keypairs gar nicht nutzbar.
+    /// Ausserdem stellt der Filter sicher, dass eine Operation nie
+    /// versehentlich auf einem Objekt des falschen Typs landet.
+    fn find_key_by_label(
+        &self,
+        session: &Session,
+        label: &str,
+        class: ObjectClass,
+    ) -> Result<ObjectHandle> {
+        let template = vec![
+            Attribute::Class(class),
+            Attribute::Label(label.as_bytes().to_vec()),
+        ];
         let handles = session.find_objects(&template)?;
         match handles.len() {
-            0 => Err(anyhow!("Kein Key mit Label '{label}' gefunden")),
+            0 => Err(anyhow!(
+                "Kein Objekt der Klasse {class:?} mit Label '{label}' gefunden"
+            )),
             1 => Ok(handles[0]),
             n => Err(anyhow!(
-                "Mehrdeutig: {n} Keys mit Label '{label}' gefunden — Konfiguration \
-                 auf dem HSM prüfen, Labels müssen eindeutig sein"
+                "Mehrdeutig: {n} Objekte der Klasse {class:?} mit Label '{label}' \
+                 gefunden — Konfiguration auf dem HSM prüfen, Labels müssen je \
+                 Klasse eindeutig sein"
             )),
         }
     }
 
     pub fn sign(&self, key_label: &str, mechanism: &Mechanism, data: &[u8]) -> Result<Vec<u8>> {
         let session = self.open_session()?;
-        let key = self.find_key_by_label(&session, key_label)?;
+        let key = self.find_key_by_label(&session, key_label, ObjectClass::PRIVATE_KEY)?;
         Ok(session.sign(mechanism, key, data)?)
     }
 
@@ -89,19 +108,21 @@ impl HsmClient {
         signature: &[u8],
     ) -> Result<bool> {
         let session = self.open_session()?;
-        let key = self.find_key_by_label(&session, key_label)?;
+        let key = self.find_key_by_label(&session, key_label, ObjectClass::PUBLIC_KEY)?;
         Ok(session.verify(mechanism, key, data, signature).is_ok())
     }
 
+    /// Nur AES-Secret-Keys: `server.rs::build_aes_cbc_pad` laesst als
+    /// Mechanismus ausschliesslich AES-CBC-Pad zu.
     pub fn encrypt(&self, key_label: &str, mechanism: &Mechanism, data: &[u8]) -> Result<Vec<u8>> {
         let session = self.open_session()?;
-        let key = self.find_key_by_label(&session, key_label)?;
+        let key = self.find_key_by_label(&session, key_label, ObjectClass::SECRET_KEY)?;
         Ok(session.encrypt(mechanism, key, data)?)
     }
 
     pub fn decrypt(&self, key_label: &str, mechanism: &Mechanism, data: &[u8]) -> Result<Vec<u8>> {
         let session = self.open_session()?;
-        let key = self.find_key_by_label(&session, key_label)?;
+        let key = self.find_key_by_label(&session, key_label, ObjectClass::SECRET_KEY)?;
         Ok(session.decrypt(mechanism, key, data)?)
     }
 
@@ -138,7 +159,8 @@ impl HsmClient {
         plaintext: &[u8],
     ) -> Result<Vec<u8>> {
         let session = self.open_session()?;
-        let base_key = self.find_key_by_label(&session, base_key_label)?;
+        // ECDH1_DERIVE braucht den privaten Key des HSM als Basis.
+        let base_key = self.find_key_by_label(&session, base_key_label, ObjectClass::PRIVATE_KEY)?;
         let derived = session.derive_key(
             derive_mechanism,
             base_key,
@@ -160,7 +182,8 @@ impl HsmClient {
         ciphertext: &[u8],
     ) -> Result<Vec<u8>> {
         let session = self.open_session()?;
-        let base_key = self.find_key_by_label(&session, base_key_label)?;
+        // ECDH1_DERIVE braucht den privaten Key des HSM als Basis.
+        let base_key = self.find_key_by_label(&session, base_key_label, ObjectClass::PRIVATE_KEY)?;
         let derived = session.derive_key(
             derive_mechanism,
             base_key,
