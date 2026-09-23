@@ -1,0 +1,53 @@
+# Build-Artefakte (Rust / Cargo)
+/target/
+**/target/
+*.pdb
+*.rs.bk
+*.d
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.vs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Lokale Zertifikate/Keys — duerfen nie ins Repo.
+/certs/
+*.pem
+*.key
+*.p12
+*.pfx
+*.csr
+*.srl
+
+# Lokale/operative Config — nur Vorlage tracken.
+# config/clients.example.yaml bleibt bewusst getrackt.
+config/clients.yaml
+
+# Secrets / Umgebung
+.env
+.env.*
+
+# SoftHSM2-Testtoken
+softhsm2.conf
+/softhsm2-tokens/
+
+# Laufzeitdaten: Audit-Log, sonstige Logs
+*.jsonl
+*.log
+
+# Python-Beispielclient
+__pycache__/
+*.pyc
+*.pyo
+examples/__pycache__/
+
+# Local agent instructions - intentionally never synced to GitHub.
+AGENTS.md

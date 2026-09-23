@@ -1,0 +1,20 @@
+[package]
+name = "gateway-client-example"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal example client for pico-hsm-api-connector (sign/verify + encrypt/decrypt roundtrips)."
+
+[[bin]]
+name = "gateway-client-example"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros"] }
+tokio-rustls = "0.26"
+rustls = "0.23"
+rustls-pemfile = "2"
+serde_json = "1"
+base64 = "0.22"
+anyhow = "1"
+
+[workspace]

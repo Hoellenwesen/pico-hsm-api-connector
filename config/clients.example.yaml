@@ -1,0 +1,55 @@
+# Authorization config: per client (identified by the CN of its
+# mTLS client certificate), explicitly list which operations it may run
+# on which key labels.
+#
+# Principle: default-deny. A client not listed here is rejected before any
+# PKCS#11 session is opened. A listed client may ONLY use the listed
+# (operation, key_label) combinations — nothing else, and in particular no
+# object-management, backup, or admin operations, for which this service
+# simply provides no functions (see README.md).
+#
+# This template file is tracked. The real file (`config/clients.yaml`)
+# is gitignored and must never be committed.
+
+clients:
+  - cn: "app-a.internal.example"
+    description: "Example: may only encrypt/decrypt with one shared encryption key"
+    permissions:
+      - operation: encrypt
+        key_labels: ["shared-encryption-key"]
+      - operation: decrypt
+        key_labels: ["shared-encryption-key"]
+
+  - cn: "app-b.internal.example"
+    description: "Example: may only sign/verify with its own key"
+    permissions:
+      - operation: sign
+        key_labels: ["app-b-signing-key"]
+      - operation: verify
+        key_labels: ["app-b-signing-key"]
+
+  - cn: "app-c.internal.example"
+    description: "Example: key derivation for a single wrapping scenario"
+    permissions:
+      # Wrapping and unwrapping are separate operations. A client that
+      # should only wrap key material gets just derive_and_encrypt.
+      - operation: derive_and_encrypt
+        key_labels: ["app-c-derive-key"]
+        # SECURITY-CRITICAL and therefore mandatory for both derive_*
+        # operations: only these counterparty public keys may be used for
+        # ECDH derive. A freely chosen peer key would be fatal — ECDH is
+        # symmetric, so the client could recompute the derived wrapping key
+        # itself (worthless hardware binding) and reconstruct the private
+        # key from the HSM via invalid-curve queries.
+        #
+        # Produce a value (counterparty public key, same bytes as for
+        # `pkcs11-tool --derive -i <file>`):
+        #   openssl ec -in peer.pem -pubout -outform DER | base64 -w0
+        #
+        # Every entry must be operator-vetted: on the expected curve and
+        # actually belonging to the intended counterparty.
+        # Placeholder (decodes to "REPLACE-WITH-REAL-PEER-PUBLIC-KEY").
+        # Deliberately valid base64 so this template stays loadable —
+        # any real derive call with this value fails, which is intended.
+        peer_public_keys:
+          - "UkVQTEFDRS1XSVRILVJFQUwtUEVFUi1QVUJMSUMtS0VZ"

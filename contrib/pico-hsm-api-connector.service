@@ -1,0 +1,35 @@
+[Unit]
+Description=Pico-HSM API connector (mTLS gateway to USB Pico-HSM)
+Documentation=https://github.com/Hoellenwesen/pico-hsm
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=hsm-gateway
+Group=hsm-gateway
+# All gateway settings, including secrets. Owned by root:hsm-gateway, mode 0640.
+EnvironmentFile=/etc/hsm-gateway/env
+ExecStart=/usr/local/bin/pico-hsm-api-connector
+Restart=always
+RestartSec=5
+# Logging goes to the journal; tune verbosity via RUST_LOG in the env file.
+StandardOutput=journal
+StandardError=journal
+
+# Hardening (review against your distro; keep what your systemd supports).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# State for the audit log must stay writable:
+ReadWritePaths=/var/log/hsm-api-gateway
+# USB device access is granted via the udev rule in docs/17-linux-service.md,
+# not via broad DevicePolicy — review DeviceAllow= if you lock this further.
+
+[Install]
+WantedBy=multi-user.target
