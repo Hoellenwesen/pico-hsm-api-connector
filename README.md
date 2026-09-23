@@ -186,24 +186,8 @@ means the outcome is unknown.
 
 ## Open items before production
 
-1. **Hardware coverage is partial (verified 2026-09-23, Pico-HSM FW 6.6, OpenSC driver):**
-   slot/token detection, PIN login, `sign → ok`, `verify → verified:true`,
-   `denied` path, cert-policy reject — all green against real hardware.
-   Still missing: the full mechanism matrix exclusively via
-   `libsc-hsm-pkcs11.so` (OpenSC's sc-hsm driver has no AES, so
-   encrypt/decrypt/derive could not be exercised yet).
-2. **KDF verification**: `EcKdf::sha256()` requires `shared_data` (a fixed
-   domain string is used); whether `sc-hsm-embedded` honors `CKD_SHA256_KDF`
-   is unverified — cover in the smoke test before production.
-3. **Mechanism scope**: MVP is ECDSA-SHA256 + AES-CBC-PAD + ECDH1_DERIVE.
-   RSA-PKCS/PSS (firmware supports RSA 1024–4096) is a deferred extension in
-   `server.rs` + `hsm.rs`.
-4. SoftHSM2 covers authz/mTLS/protocol but NOT the exact firmware mechanism
-   behavior — a green SoftHSM run does not replace the real-board run.
-5. **No per-client rate limiting**: a compromised but correctly authorized
-   client certificate can issue unlimited operations. Conscious gap carried
-   over from the pre-wipe threat-model addendum — revisit if the client
-   count or threat level grows.
+Tracked in `ROADMAP.md` (single progress document — milestones M1–M5 plus
+parked items). Do not add parallel lists here.
 
 ## Threat model (summary)
 
@@ -215,6 +199,7 @@ operations, PIN via runtime-injected env (zeroized in memory).
 
 ## Further documentation
 
+- `ROADMAP.md` — progress document (milestones, parked items).
 - `docs/16-real-hardware-and-cert-rotation.md` — real board + certificate rotation runbook.
 - `docs/17-linux-service.md` — Linux install + systemd service (`contrib/pico-hsm-api-connector.service`).
 - `docs/18-client-integration.md` — onboarding + wire protocol + example clients
